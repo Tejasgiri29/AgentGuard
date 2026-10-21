@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  agentguard-postgres:
+    image: postgres:16-alpine
+    container_name: agentguard-postgres
+    environment:
+      POSTGRES_DB: agentguard_db
+      POSTGRES_USER: agentguard
+      POSTGRES_PASSWORD: agentguard_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - agentguard_pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init-agentguard.sql:/docker-entrypoint-initdb.d/init-agentguard.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentguard -d agentguard_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  agentguard-redis:
+    image: redis:7-alpine
+    container_name: agentguard-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - agentguard_redisdata:/data
+      - ./infra/redis/rate_limiter.lua:/scripts/rate_limiter.lua
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  agentguard-kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: agentguard-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://agentguard-kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@agentguard-kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+
+  agentguard-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agentguard-backend
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://agentguard-postgres:5432/agentguard_db
+      SPRING_DATASOURCE_USERNAME: agentguard
+      SPRING_DATASOURCE_PASSWORD: agentguard_secret
+      SPRING_DATA_REDIS_HOST: agentguard-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: agentguard-kafka:29092
+    depends_on:
+      agentguard-postgres:
+        condition: service_healthy
+      agentguard-redis:
+        condition: service_healthy
+
+  agentguard-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: agentguard-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - agentguard-backend
+
+volumes:
+  agentguard_pgdata:
+  agentguard_redisdata:
